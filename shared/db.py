@@ -97,14 +97,6 @@ class Job(Base):
     parent_job = relationship("Job", remote_side=[id])
     child_jobs = relationship("Job", remote_side=[parent_job_id])
 
-    __table_args__ = (
-        Index('idx_jobs_profile_target', 'profile_id', 'target_value'),
-        Index('idx_jobs_status', 'status'),
-        Index('idx_jobs_requested_tools', 'requested_tools', postgresql_using='gin'),
-        Index('idx_jobs_expires', 'expires_at'),
-        CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed', 'cancelled', 'quarantined')", name='check_job_status')
-    )
-
 class JobResult(Base):
     __tablename__ = "job_results"
 
@@ -153,7 +145,3 @@ class Invoice(Base):
 
     # Relationships
     user = relationship("User", back_populates="invoices")
-
-    __table_args__ = (
-        CheckConstraint("status IN ('pending', 'completed', 'failed', 'refunded')", name='check_invoice_status')
-    )

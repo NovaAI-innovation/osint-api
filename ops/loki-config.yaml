@@ -3,6 +3,12 @@ auth_enabled: false
 server:
   http_listen_port: 3100
 
+limits_config:
+  # Allow running Loki with the v11 / boltdb-shipper schema even when the
+  # binary is a newer Loki 3.x build (which normally forces v13 + tsdb).
+  # Long-term fix: update the schema_config to use schema v13 and tsdb index.
+  allow_structured_metadata: false
+
 common:
   path_prefix: /loki
   storage:
