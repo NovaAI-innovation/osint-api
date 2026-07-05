@@ -1,0 +1,20 @@
+# Spectral Configuration for OSINT API
+# This ensures the OpenAPI spec adheres to quality and security standards.
+
+extends:
+  - spectral:oas
+
+rules:
+  # Enable standard recommended rules for OpenAPI 3
+  oas3-api-servers: error
+  no-enum-type-mismatch: error
+  operation-operationId-unique: error
+
+  # Custom Rule: Ensure all operations define the x-rateLimit extension
+  x-rate-limit-defined:
+    description: Every operation must define the x-rateLimit extension for API governance.
+    given: $.paths.*[?( @property =~ /^(get|post|put|delete|patch)$/ )]
+    severity: error
+    then:
+      - field: x-rateLimit
+        function: truthy

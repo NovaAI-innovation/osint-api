@@ -1,0 +1,194 @@
+version: '3.8'
+
+services:
+  # API Gateway: Handles HTTP traffic, Auth, and Request Validation
+  api-gateway:
+    image: osint-api-gateway:latest
+    build: ./gateway
+    ports:
+      - "443:443"
+    environment:
+      - DB_HOST
+      - DB_PORT
+      - DB_NAME
+      - DB_USER
+      - DB_PASSWORD
+      - REDIS_URL
+      - OAUTH_PROVIDER_URL
+      - OAUTH_CLIENT_ID
+      - OAUTH_CLIENT_SECRET
+      - LOG_LEVEL
+    depends_on:
+      - postgres
+      - redis
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: unless-stopped
+
+  # Worker Node: Polls Redis and executes OSINT tools
+  worker:
+    image: osint-worker:latest
+    build: ./worker
+    environment:
+      - REDIS_URL
+      - DB_HOST
+      - DB_PORT
+      - DB_NAME
+      - DB_USER
+      - DB_PASSWORD
+      - WORKER_CONCURRENCY
+      - LOG_LEVEL
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+
+  # Orchestrator: Manages identity resolution chaining and profile graph
+  orchestrator:
+    image: osint-orchestrator:latest
+    build: ./orchestrator
+    environment:
+      - REDIS_URL
+      - DB_HOST
+      - DB_PORT
+      - DB_NAME
+      - DB_USER
+      - DB_PASSWORD
+      - LOG_LEVEL
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: unless-stopped
+
+  # Billing Service: Handles payments (PayPal, BTCPay) and credit management
+  billing-service:
+    image: osint-billing:latest
+    build: ./billing
+    environment:
+      - DB_HOST
+      - DB_PORT
+      - DB_NAME
+      - DB_USER
+      - DB_PASSWORD
+      - PAYPAL_CLIENT_ID
+      - PAYPAL_CLIENT_SECRET
+      - PAYPAL_WEBHOOK_ID
+      # BTCPay Server (Decentralized Crypto Gateway)
+      - BTCPAY_URL
+      - BTCPAY_STORE_ID
+      - BTCPAY_API_KEY
+      - BTCPAY_WEBHOOK_SECRET
+      - LOG_LEVEL
+    depends_on:
+      - postgres
+    ports:
+      - "8081:8080"
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    restart: unless-stopped
+
+  # Redis: Job Queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    restart: unless-stopped
+
+  # PostgreSQL: Persistence Layer
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+
+  # Prometheus: Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+
+  # Loki: Log Aggregation
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./ops/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local

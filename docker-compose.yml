@@ -1,0 +1,142 @@
+version: '3.8'
+
+services:
+  # --- Infrastructure ---
+
+  # PostgreSQL: Persistence Layer
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=osint_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # Redis: Job Queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Prometheus: Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+
+  # Loki: Log Aggregation
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./ops/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  # --- Application Services ---
+
+  # API Gateway
+  api-gateway:
+    build: ./gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=osint_db
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=info
+    volumes:
+      - ./shared:/app/shared
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  # Worker Node
+  worker:
+    build: ./worker
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=osint_db
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - WORKER_CONCURRENCY=2
+      - LOG_LEVEL=info
+    volumes:
+      - ./shared:/app/shared
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  # Orchestrator
+  orchestrator:
+    build: ./orchestrator
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=osint_db
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - LOG_LEVEL=info
+    volumes:
+      - ./shared:/app/shared
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  # Billing Service
+  billing-service:
+    build: ./billing
+    ports:
+      - "8081:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=osint_db
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - LOG_LEVEL=info
+      # MOCK KEYS FOR LOCAL DEVELOPMENT - REPLACE IN PRODUCTION
+      - PAYPAL_CLIENT_ID=mock_id
+      - PAYPAL_CLIENT_SECRET=mock_secret
+      - PAYPAL_WEBHOOK_ID=mock_webhook_id
+      - BTCPAY_URL=http://btcpay.example.com
+      - BTCPAY_STORE_ID=mock_store_id
+      - BTCPAY_API_KEY=mock_api_key
+      - BTCPAY_WEBHOOK_SECRET=mock_secret
+    volumes:
+      - ./shared:/app/shared
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  loki_data:
