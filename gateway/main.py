@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, status
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 import redis
 from sqlalchemy.orm import Session
 
@@ -30,16 +30,18 @@ class ProfileCreateRequest(BaseModel):
     tools: List[str] = Field(default=[], description="List of tools to run. Empty implies default for type.")
     max_depth: int = Field(default=1, ge=0, le=3, description="Graph traversal depth")
 
-    @validator('target_type')
+    @field_validator('target_type')
+    @classmethod
     def validate_target_type(cls, v):
         allowed = ['username', 'email', 'domain', 'phone']
         if v not in allowed:
             raise ValueError(f"target_type must be one of {allowed}")
         return v
 
-    @validator('target')
-    def validate_target(cls, v, values):
-        t_type = values.get('target_type')
+    @field_validator('target')
+    @classmethod
+    def validate_target(cls, v, info):
+        t_type = info.data.get('target_type') if info.data else None
         if t_type == 'email':
             if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", v):
                 raise ValueError("Invalid email format")
