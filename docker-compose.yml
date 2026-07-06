@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # --- Infrastructure ---
 
@@ -42,8 +40,11 @@ services:
   # Loki: Log Aggregation
   loki:
     image: grafana/loki:2.9.10
+    # Host port 31000 → container 3100. Port 3100 itself is in Docker Desktop's
+    # reserved/excluded range on this Windows host (WSAEACCES on bind), so we
+    # publish on a host port that is reliably free.
     ports:
-      - "3100:3100"
+      - "31000:3100"
     volumes:
       - ./ops/loki-config.yaml:/etc/loki/local-config.yaml
       - loki_data:/loki
