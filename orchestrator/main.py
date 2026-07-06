@@ -60,6 +60,12 @@ def get_or_create_entity(db: Session, value: str, entity_type: str) -> Entity:
     else:
         entity = Entity(value=value, type=entity_type, first_seen_at=datetime.utcnow(), last_seen_at=datetime.utcnow())
         db.add(entity)
+        # Flush so a later iteration of the caller (e.g. another entity
+        # value found in the same JobResult) sees this row in the next
+        # SELECT and skips the create branch. Without the flush the next
+        # query still returns None (uncommitted) and we INSERT a duplicate
+        # that explodes on db.commit() at the end of process_job.
+        db.flush()
     return entity
 
 def process_job(job_id: str, db: Session):
