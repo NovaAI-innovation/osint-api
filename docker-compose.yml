@@ -14,6 +14,12 @@ services:
     ports:
       - "5432:5432"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d osint_db -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   # Redis: Job Queue
   redis:
@@ -23,6 +29,12 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   # Prometheus: Metrics Collection
   prometheus:
@@ -69,8 +81,10 @@ services:
     volumes:
       - ./shared:/app/shared
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   # Worker Node
@@ -88,8 +102,10 @@ services:
     volumes:
       - ./shared:/app/shared
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   # Orchestrator
@@ -106,8 +122,10 @@ services:
     volumes:
       - ./shared:/app/shared
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   # Billing Service
@@ -133,7 +151,8 @@ services:
     volumes:
       - ./shared:/app/shared
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
