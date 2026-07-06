@@ -8,7 +8,25 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://user:pass@localhost/osint_db")
+def _database_url() -> str:
+    # Prefer a fully-specified DATABASE_URL (production/12-factor).
+    # Otherwise assemble from the DB_* component variables that
+    # docker-compose already exports on every service that needs the
+    # DB. The previous `localhost` default made every DB query fail
+    # with `Connection refused` from inside the gateway container.
+    url = os.getenv("DATABASE_URL")
+    if url:
+        return url
+    from urllib.parse import quote_plus
+    user = os.getenv("DB_USER", "postgres")
+    password = quote_plus(os.getenv("DB_PASSWORD", ""))
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "osint_db")
+    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
+
+
+DATABASE_URL = _database_url()
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
