@@ -10,7 +10,17 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from shared.db import SessionLocal
 
 REDIS_URL = os.getenv("REDIS_URL")
-r = redis.from_url(REDIS_URL)
+# Force RESP2 and disable socket read timeouts so BRPOP can block indefinitely
+# on an empty queue. The modern RESP3 parser in redis-py 5.x picks a finite
+# socket_timeout default, which raises TimeoutError on every BRPOP against
+# an empty queue and surfaces as the worker's "Redis unavailable, retrying in
+# 2s" wall. protocol=2 + explicit socket_timeout=None is the standard fix.
+r = redis.from_url(
+    REDIS_URL,
+    socket_timeout=None,
+    socket_connect_timeout=None,
+    protocol=2,
+)
 
 # Must match the gateway's queue: gateway/main.py -> "osint_jobs".
 QUEUE_NAME = "osint_jobs"
