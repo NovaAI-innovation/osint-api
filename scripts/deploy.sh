@@ -51,15 +51,20 @@ command -v docker >/dev/null 2>&1 || fail "docker not installed and SKIP_DOCKER_
 docker compose version >/dev/null 2>&1 || fail "docker compose plugin missing"
 
 # 2. Repo
-if [ -d "$DEPLOY_DIR/.git" ]; then
+if [ ! -d "$DEPLOY_DIR" ]; then
+  log "cloning $REPO_URL -> $DEPLOY_DIR"
+  mkdir -p "$(dirname "$DEPLOY_DIR")"
+  git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$DEPLOY_DIR"
+elif [ -d "$DEPLOY_DIR/.git" ] && git -C "$DEPLOY_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   log "updating existing clone at $DEPLOY_DIR"
   git -C "$DEPLOY_DIR" fetch --all --prune
   git -C "$DEPLOY_DIR" checkout "$BRANCH"
   git -C "$DEPLOY_DIR" pull --ff-only
 else
-  log "cloning $REPO_URL -> $DEPLOY_DIR"
+  warn "$DEPLOY_DIR exists but is not a clean git repo (likely a partial clone). Resetting."
+  rm -rf "$DEPLOY_DIR"
   mkdir -p "$(dirname "$DEPLOY_DIR")"
-  git clone --branch "$BRANCH" "$REPO_URL" "$DEPLOY_DIR"
+  git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$DEPLOY_DIR"
 fi
 
 cd "$DEPLOY_DIR"
