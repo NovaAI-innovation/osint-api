@@ -37,6 +37,8 @@ code{background:var(--p2);padding:1px 4px;border-radius:3px;font-size:12px}
 .log .line .ts{color:#555a66;margin-right:8px}
 .log .line.info{color:#cfd5e0}.log .line.ok{color:var(--ok)}.log .line.warn{color:var(--warn)}.log .line.bad{color:var(--bad)}
 details summary{cursor:pointer;color:var(--muted);font-size:12px}details[open] summary{margin-bottom:8px}
+ul.tree,ul.tree ul{list-style:none;margin:4px 0;padding-left:18px;border-left:1px dashed var(--bd)}
+ul.tree li{margin:4px 0;padding:2px 0}
 </style>
 </head>
 <body>
@@ -59,6 +61,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px}details[open] s
     <div class="tabs">
       <button id="tab-free" class="active">Free Dev Search (no auth)</button>
       <button id="tab-real">Real API (credits required)</button>
+      <button id="tab-rec">Recursive Search</button>
     </div>
     <div id="free-pane">
       <div class="row">
@@ -91,6 +94,37 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px}details[open] s
         </div>
       </div>
       <div class="small" style="margin-top:8px">Calls <code>POST /v1/profiles</code>, then polls <code>GET /v1/jobs/{id}</code> every 2s.</div>
+    </div>
+
+    <div id="rec-pane" style="display:none">
+      <div class="row">
+        <div class="c3">
+          <label>Target type</label>
+          <select id="rec-type"><option value="username">username</option><option value="email">email</option><option value="domain">domain</option><option value="phone">phone</option></select>
+        </div>
+        <div class="c7">
+          <label>Target value</label>
+          <input id="rec-target" type="text" value="alice" />
+        </div>
+        <div class="c2">
+          <label>Max depth</label>
+          <select id="rec-depth"><option>0</option><option selected>1</option><option>2</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="c12">
+          <label>Tools (comma separated; empty = default)</label>
+          <input id="rec-tools" type="text" placeholder="sherlock, holehe" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="c12">
+          <button id="rec-run">Run full recursive search</button>
+          <button id="rec-cancel" class="ghost" disabled>Cancel cascade</button>
+          <span class="small" id="rec-status" style="margin-left:10px"></span>
+        </div>
+      </div>
+      <div class="small" style="margin-top:8px">Calls <code>POST /v1/profiles</code>, then repeatedly <code>GET /v1/profiles/{id}</code> and renders the live job tree as the orchestrator chains child jobs up to <code>max_depth</code>.</div>
     </div>
     <div style="margin-top:14px">
       <div class="toolbar">
@@ -243,14 +277,93 @@ POST /v1/credits/purchase     body: {amount_cents, payment_method}             h
 
   function stopPolling(){if(pollTimer) clearTimeout(pollTimer);pollTimer=null;stopBtn.disabled=true;realStatus.textContent="stopped";$("#real-run").disabled=false;}
 
-  tabFree.onclick=function(){tabFree.className="active";tabReal.className="";freePane.style.display="";realPane.style.display="none";};
-  tabReal.onclick=function(){tabReal.className="active";tabFree.className="";realPane.style.display="";freePane.style.display="none";};
+  tabFree.onclick=function(){tabFree.className="active";tabReal.className="";tabRec.className="";freePane.style.display="";realPane.style.display="none";recPane.style.display="none";};
+  tabReal.onclick=function(){tabReal.className="active";tabFree.className="";tabRec.className="";realPane.style.display="";freePane.style.display="none";recPane.style.display="none";};
+  tabRec.onclick=function(){tabRec.className="active";tabFree.className="";tabReal.className="";recPane.style.display="";freePane.style.display="none";realPane.style.display="none";};
   $("#free-run").onclick=runFree;
   $("#real-run").onclick=runReal;
   stopBtn.onclick=stopPolling;
   $("#copy-btn").onclick=function(){if(!lastJsonText)return;navigator.clipboard&&navigator.clipboard.writeText(lastJsonText).then(function(){log("copied JSON to clipboard","ok");});};
   $("#free-target").addEventListener("keydown",function(e){if(e.key==="Enter")runFree();});
   $("#real-target").addEventListener("keydown",function(e){if(e.key==="Enter")runReal();});
+
+  // --- Recursive Search tab logic ---
+  var recPane=$("#rec-pane"),tabRec=$("#tab-rec"),recCancelBtn=$("#rec-cancel"),recStatus=$("#rec-status");
+  var recPollTimer=null,recProfileId=null,lastRendered="";
+
+  function renderTree(nodes){
+    if(!nodes||!nodes.length) return "";
+    var html="<ul class='tree'>";
+    for(var i=0;i<nodes.length;i++){
+      var n=nodes[i];
+      var badge=(n.status==="completed"?"good":(n.status==="failed"||n.status==="cancelled")?"bad":(n.status==="processing"||n.status==="pending")?"warn":"");
+      var rc=(n.results||[]).length;
+      html+="<li><span class='badge "+badge+"'>d"+n.depth+" "+n.status+"</span> <code>"+esc(n.target_type)+"</code> "+esc(n.target_value)+" <span class='small'>(tools: "+(n.requested_tools||[]).join(",")+" | results: "+rc+")</span>";
+      if(n.children&&n.children.length){ html+=renderTree(n.children); }
+      html+="</li>";
+    }
+    html+="</ul>";
+    return html;
+  }
+
+  function runRecursive(){
+    var tt=$("#rec-type").value,tv=$("#rec-target").value.trim();
+    var depth=parseInt($("#rec-depth").value,10)||1;
+    var toolsRaw=$("#rec-tools").value.trim();
+    var tools=toolsRaw?toolsRaw.split(",").map(function(s){return s.trim();}).filter(Boolean):[];
+    if(!tv){log("target required","warn");return;}
+    log("recursive submit "+tt+"="+tv+" depth="+depth);
+    recStatus.textContent="submitting...";$("#rec-run").disabled=true;
+    http("POST","/v1/profiles",{target:tv,target_type:tt,tools:tools,max_depth:depth}).then(function(r){
+      if(r.status!==200&&r.status!==202){
+        show(r.data,"http "+r.status,"","bad");recStatus.textContent="failed";$("#rec-run").disabled=false;log("submit failed HTTP "+r.status,"bad");return;
+      }
+      recProfileId=r.data.profile_id||(r.data.data&&r.data.data.profile_id);
+      show({submitted:r.data},"queued","profile_id="+recProfileId,"warn");
+      log("profile created, polling tree...","ok");
+      recCancelBtn.disabled=false;
+      pollRecursive();
+    }).catch(function(e){
+      show({error:String(e)},"network","","bad");recStatus.textContent="network error";$("#rec-run").disabled=false;log("submit network error","bad");
+    });
+  }
+
+  function pollRecursive(){
+    if(!recProfileId) return;
+    if(recPollTimer) clearTimeout(recPollTimer);
+    http("GET","/v1/profiles/"+recProfileId).then(function(r){
+      if(r.status!==200){recStatus.textContent="poll HTTP "+r.status;return;}
+      var counts=r.data&&r.data.counts||{};
+      var inFlight=(counts.pending||0)+(counts.processing||0);
+      recStatus.textContent="in-flight="+inFlight+" | "+JSON.stringify(counts);
+      var tree=r.data&&r.data.tree||[];
+      var html="<div class='small'>profile_id="+esc(recProfileId)+" status="+esc(r.data.status)+" max_depth="+r.data.max_depth+" counts="+esc(JSON.stringify(counts))+"</div>";
+      html+=renderTree(tree);
+      if(html!==lastRendered){ lastRendered=html; resultJson.innerHTML=html; lastJsonText=JSON.stringify(r.data,null,2); }
+      if(inFlight>0){
+        recPollTimer=setTimeout(pollRecursive,2000);
+      }else{
+        recStatus.textContent="done | "+JSON.stringify(counts);
+        recCancelBtn.disabled=true;$("#rec-run").disabled=false;
+        show(r.data,"completed","profile complete","good");
+        log("recursive cascade complete: "+JSON.stringify(counts),"ok");
+      }
+    }).catch(function(e){
+      recStatus.textContent="poll error";log("tree poll error: "+e,"bad");
+      recPollTimer=setTimeout(pollRecursive,4000);
+    });
+  }
+
+  function cancelRecursive(){
+    if(!recProfileId) return;
+    http("POST","/v1/profiles/"+recProfileId+"/cancel").then(function(r){
+      recCancelBtn.disabled=true;log("cascade cancelled: "+JSON.stringify(r.data),"warn");pollRecursive();
+    }).catch(function(e){log("cancel error: "+e,"bad");});
+  }
+
+  $("#rec-run").onclick=runRecursive;
+  recCancelBtn.onclick=cancelRecursive;
+  $("#rec-target").addEventListener("keydown",function(e){if(e.key==="Enter")runRecursive();});
 
   checkHealth();
   setInterval(checkHealth,15000);

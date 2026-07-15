@@ -211,3 +211,184 @@ def test_cors_respects_configured_origins():
     # Disallowed origin: header must NOT echo it (CORS spec).
     r2 = client.get("/healthz", headers={"Origin": "http://localhost:8080"})
     assert r2.headers.get("access-control-allow-origin") != "http://localhost:8080"
+
+
+# ---------- Recursive profile (full search cascade) ----------
+
+def _make_profile(user_id, profile_id=None, status="active"):
+    p = MagicMock()
+    p.id = profile_id or uuid.uuid4()
+    p.user_id = user_id
+    p.status = status
+    p.root_target = "alice"
+    p.root_type = "username"
+    p.max_depth = 2
+    p.created_at = None
+    p.completed_at = None
+    return p
+
+
+def _make_tree_job(profile_id, parent_id, depth, target_type, target_value, status="completed", results=None):
+    j = MagicMock()
+    j.id = uuid.uuid4()
+    j.profile_id = profile_id
+    j.parent_job_id = parent_id
+    j.depth = depth
+    j.target_type = target_type
+    j.target_value = target_value
+    j.requested_tools = ["sherlock"]
+    j.status = status
+    j.created_at = None
+    j.updated_at = None
+    j.expires_at = None
+    j.results = results or []
+    return j
+
+
+def test_read_profile_404_when_missing():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    with patch("shared.db.SessionLocal", return_value=db):
+        client = TestClient(gw_main.app)
+        r = client.get(f"/v1/profiles/{uuid.uuid4()}", headers={"api-key": "osint_x"})
+    assert r.status_code == 404
+
+
+def test_read_profile_returns_full_tree():
+    user = MagicMock(); user.id = uuid.uuid4()
+    profile = _make_profile(user.id)
+    root = _make_tree_job(profile.id, None, 0, "username", "alice")
+    child = _make_tree_job(profile.id, root.id, 1, "email", "alice@example.com")
+    grand = _make_tree_job(profile.id, child.id, 2, "domain", "example.com", status="pending")
+
+    profile_q = MagicMock(); profile_q.filter.return_value.first.return_value = profile
+    jobs_q = MagicMock(); jobs_q.filter.return_value.all.return_value = [root, child, grand]
+    db = MagicMock(); db.query.side_effect = [profile_q, jobs_q]
+
+    gw_main.app.dependency_overrides[gw_main.get_current_user] = lambda: user
+    try:
+        with patch("shared.db.SessionLocal", return_value=db):
+            client = TestClient(gw_main.app)
+            r = client.get(f"/v1/profiles/{profile.id}", headers={"api-key": "osint_x"})
+    finally:
+        gw_main.app.dependency_overrides.pop(gw_main.get_current_user, None)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["profile_id"] == str(profile.id)
+    assert body["counts"]["total"] == 3
+    assert body["counts"]["completed"] == 2
+    assert body["counts"]["pending"] == 1
+    assert len(body["tree"]) == 1
+    assert body["tree"][0]["target_value"] == "alice"
+    assert len(body["tree"][0]["children"]) == 1
+    assert body["tree"][0]["children"][0]["target_value"] == "alice@example.com"
+    assert len(body["tree"][0]["children"][0]["children"]) == 1
+    assert body["tree"][0]["children"][0]["children"][0]["target_value"] == "example.com"
+
+
+def test_read_profile_403_when_other_user():
+    owner = uuid.uuid4()
+    user = MagicMock(); user.id = uuid.uuid4()
+    profile = _make_profile(owner)
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = profile
+    gw_main.app.dependency_overrides[gw_main.get_current_user] = lambda: user
+    try:
+        with patch("shared.db.SessionLocal", return_value=db):
+            client = TestClient(gw_main.app)
+            r = client.get(f"/v1/profiles/{profile.id}", headers={"api-key": "osint_x"})
+    finally:
+        gw_main.app.dependency_overrides.pop(gw_main.get_current_user, None)
+    assert r.status_code == 403
+
+
+def test_wait_for_profile_returns_when_idle():
+    user = MagicMock(); user.id = uuid.uuid4()
+    profile = _make_profile(user.id)
+    profile_q = MagicMock(); profile_q.filter.return_value.first.return_value = profile
+    jobs_q = MagicMock(); jobs_q.filter.return_value.all.return_value = []
+    pending_q = MagicMock(); pending_q.filter.return_value.count.return_value = 0
+    db = MagicMock(); db.query.side_effect = [profile_q, jobs_q, pending_q]
+    db.expire_all = MagicMock()
+
+    gw_main.app.dependency_overrides[gw_main.get_current_user] = lambda: user
+    try:
+        with patch("shared.db.SessionLocal", return_value=db):
+            client = TestClient(gw_main.app)
+            r = client.get(
+                f"/v1/profiles/{profile.id}/wait",
+                params={"timeout_s": 5, "poll_interval_s": 0.5},
+                headers={"api-key": "osint_x"},
+            )
+    finally:
+        gw_main.app.dependency_overrides.pop(gw_main.get_current_user, None)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["profile_id"] == str(profile.id)
+    assert body["tree"] == []
+
+
+def test_wait_for_profile_rejects_bad_params():
+    user = MagicMock(); user.id = uuid.uuid4()
+    gw_main.app.dependency_overrides[gw_main.get_current_user] = lambda: user
+    try:
+        client = TestClient(gw_main.app)
+        for bad in [
+            {"timeout_s": 0},
+            {"timeout_s": 1000},
+            {"poll_interval_s": 0.01},
+            {"poll_interval_s": 100},
+        ]:
+            r = client.get(
+                f"/v1/profiles/{uuid.uuid4()}/wait",
+                params=bad,
+                headers={"api-key": "osint_x"},
+            )
+            assert r.status_code == 400, f"expected 400 for {bad}, got {r.status_code}"
+    finally:
+        gw_main.app.dependency_overrides.pop(gw_main.get_current_user, None)
+
+
+def test_cancel_profile_marks_running_jobs():
+    user = MagicMock(); user.id = uuid.uuid4()
+    profile = _make_profile(user.id)
+    p1 = _make_tree_job(profile.id, None, 0, "username", "alice", status="pending")
+    p2 = _make_tree_job(profile.id, None, 1, "email", "a@x", status="processing")
+    p3 = _make_tree_job(profile.id, None, 2, "domain", "x.com", status="completed")
+
+    profile_q = MagicMock(); profile_q.filter.return_value.first.return_value = profile
+    jobs_q = MagicMock(); jobs_q.filter.return_value.all.return_value = [p1, p2, p3]
+    db = MagicMock()
+    db.query.side_effect = [profile_q, jobs_q, jobs_q, jobs_q]  # multiple .filter().all() calls
+    db.commit = MagicMock()
+
+    gw_main.app.dependency_overrides[gw_main.get_current_user] = lambda: user
+    try:
+        with patch("shared.db.SessionLocal", return_value=db):
+            client = TestClient(gw_main.app)
+            r = client.post(f"/v1/profiles/{profile.id}/cancel", headers={"api-key": "osint_x"})
+    finally:
+        gw_main.app.dependency_overrides.pop(gw_main.get_current_user, None)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cancelled_jobs"] == 2
+    assert body["status"] == "completed"
+    assert p1.status == "cancelled"
+    assert p2.status == "cancelled"
+    assert p3.status == "completed"  # untouched
+
+
+def test_cancel_profile_403_when_other_user():
+    owner = uuid.uuid4()
+    user = MagicMock(); user.id = uuid.uuid4()
+    profile = _make_profile(owner)
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = profile
+    gw_main.app.dependency_overrides[gw_main.get_current_user] = lambda: user
+    try:
+        with patch("shared.db.SessionLocal", return_value=db):
+            client = TestClient(gw_main.app)
+            r = client.post(f"/v1/profiles/{profile.id}/cancel", headers={"api-key": "osint_x"})
+    finally:
+        gw_main.app.dependency_overrides.pop(gw_main.get_current_user, None)
+    assert r.status_code == 403

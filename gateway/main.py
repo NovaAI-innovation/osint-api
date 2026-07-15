@@ -391,6 +391,225 @@ class JobRead(BaseModel):
     results: List[JobResultRead] = []
 
 
+# --- Recursive profile (identity-resolution cascade) ---
+#
+# The orchestrator chains child jobs automatically when a job completes,
+# so a single POST /v1/profiles can grow into a tree of depth N. The
+# following endpoints let a client fetch the full tree, block until the
+# cascade is done, or cancel a long-running cascade.
+
+class JobNodeRead(JobRead):
+    """A job plus its recursively-loaded child jobs."""
+    children: List["JobNodeRead"] = []
+
+
+JobNodeRead.model_rebuild()
+
+
+class ProfileRead(BaseModel):
+    profile_id: uuid.UUID
+    status: str
+    root_target: str
+    root_type: str
+    max_depth: int
+    created_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    # The full job tree, rooted at the root job (depth 0).
+    tree: List[JobNodeRead] = []
+    # Aggregate counts for quick status checks.
+    counts: dict = {}
+
+
+def _load_job_tree(db: Session, root_jobs: list) -> List[JobNodeRead]:
+    """Recursively load all jobs in a profile as a tree.
+
+    Uses a single SELECT for all jobs in the profile, then builds the
+    tree in memory. Avoids N+1 queries for arbitrarily deep cascades.
+    """
+    if not root_jobs:
+        return []
+
+    profile_id = root_jobs[0].profile_id
+    all_jobs = db.query(Job).filter(Job.profile_id == profile_id).all()
+
+    # Build a map id -> JobNodeRead.
+    nodes: dict = {}
+    for j in all_jobs:
+        nodes[j.id] = JobNodeRead(
+            job_id=j.id,
+            profile_id=j.profile_id,
+            parent_job_id=j.parent_job_id,
+            depth=j.depth,
+            target_type=j.target_type,
+            target_value=j.target_value,
+            requested_tools=j.requested_tools or [],
+            status=j.status,
+            created_at=_iso(j.created_at),
+            updated_at=_iso(j.updated_at),
+            expires_at=_iso(j.expires_at),
+            results=[
+                JobResultRead(
+                    tool_name=r.tool_name,
+                    status_code=r.status_code,
+                    raw_output=r.raw_output,
+                    parsed_data=r.parsed_data,
+                    executed_at=_iso(r.executed_at),
+                )
+                for r in (j.results or [])
+            ],
+            children=[],
+        )
+
+    # Wire up children under their parents.
+    roots: List[JobNodeRead] = []
+    for j in all_jobs:
+        node = nodes[j.id]
+        parent_id = j.parent_job_id
+        if parent_id and parent_id in nodes:
+            nodes[parent_id].children.append(node)
+        else:
+            roots.append(node)
+    # Stable ordering: depth then target_value.
+    roots.sort(key=lambda n: (n.depth, n.target_value))
+    for n in nodes.values():
+        n.children.sort(key=lambda c: (c.depth, c.target_value))
+    return roots
+
+
+def _profile_counts(jobs) -> dict:
+    """Bucket jobs by status for a quick progress summary."""
+    counts: dict = {}
+    for j in jobs:
+        counts[j.status] = counts.get(j.status, 0) + 1
+    counts["total"] = sum(c for k, c in counts.items() if k != "total")
+    return counts
+
+
+def _load_profile(db: Session, profile_id: uuid.UUID, current_user) -> ProfileRead:
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if profile.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    jobs = db.query(Job).filter(Job.profile_id == profile_id).all()
+    tree = _load_job_tree(db, jobs)
+    return ProfileRead(
+        profile_id=profile.id,
+        status=profile.status,
+        root_target=profile.root_target,
+        root_type=profile.root_type,
+        max_depth=profile.max_depth,
+        created_at=_iso(profile.created_at),
+        completed_at=_iso(profile.completed_at),
+        tree=tree,
+        counts=_profile_counts(jobs),
+    )
+
+
+@app.get("/v1/profiles/{profile_id}", response_model=ProfileRead)
+def read_profile(
+    profile_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return a profile with the full job tree (root + all recursive children).
+
+    Auth required, tenancy-scoped to the profile owner, no credit cost.
+    Use `?wait=true&timeout_s=60` to block until the cascade finishes.
+    """
+    return _load_profile(db, profile_id, current_user)
+
+
+@app.get("/v1/profiles/{profile_id}/wait", response_model=ProfileRead)
+def wait_for_profile(
+    profile_id: uuid.UUID,
+    timeout_s: int = 60,
+    poll_interval_s: float = 1.0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Block (poll DB) until no jobs in the profile are pending/processing
+    OR until `timeout_s` elapses. Returns the full profile tree.
+
+    Useful for one-shot callers that want the entire recursive search
+    sequence to complete before responding. The HTTP connection stays
+    open for up to `timeout_s` seconds.
+    """
+    if timeout_s < 1:
+        raise HTTPException(status_code=400, detail="timeout_s must be >= 1")
+    if timeout_s > 600:
+        raise HTTPException(status_code=400, detail="timeout_s must be <= 600")
+    if poll_interval_s < 0.1 or poll_interval_s > 10:
+        raise HTTPException(status_code=400, detail="poll_interval_s must be in [0.1, 10]")
+
+    # Authorise up front.
+    _load_profile(db, profile_id, current_user)
+
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        db.expire_all()
+        pending = (
+            db.query(Job)
+            .filter(
+                Job.profile_id == profile_id,
+                Job.status.in_(["pending", "processing"]),
+            )
+            .count()
+        )
+        if pending == 0:
+            break
+        _time.sleep(poll_interval_s)
+
+    # Refresh and return the final tree.
+    db.expire_all()
+    return _load_profile(db, profile_id, current_user)
+
+
+@app.post("/v1/profiles/{profile_id}/cancel")
+def cancel_profile(
+    profile_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel all pending/processing jobs in the profile.
+
+    Marks every still-running job in the profile as 'cancelled' and
+    closes the profile. The worker picks up status='cancelled' and
+    skips them.
+    """
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if profile.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    now = datetime.utcnow()
+    cancelled = 0
+    jobs = (
+        db.query(Job)
+        .filter(
+            Job.profile_id == profile_id,
+            Job.status.in_(["pending", "processing"]),
+        )
+        .all()
+    )
+    for j in jobs:
+        j.status = "cancelled"
+        j.updated_at = now
+        cancelled += 1
+    if profile.status == "active":
+        profile.status = "completed"
+        profile.completed_at = now
+    db.commit()
+    return {
+        "profile_id": str(profile_id),
+        "cancelled_jobs": cancelled,
+        "status": profile.status,
+    }
+
+
 def _iso(value) -> Optional[str]:
     return value.isoformat() if value else None
 
