@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import redis
 from sqlalchemy.orm import Session
@@ -19,8 +20,37 @@ from shared.db import engine, get_db, SessionLocal, User, UserCredits, Profile, 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 CREDIT_COST_PROFILE = 10  # Example cost
 
+# CORS: comma-separated list of origins. "*" means allow any origin
+# (fine for dev with no cookies; unsafe for prod with credentials).
+# Default "*" so the HTML UI on a different port can call the API in dev.
+# Production should set OSINT_CORS_ORIGINS="https://app.example.com" explicitly.
+CORS_ORIGINS_RAW = os.getenv("OSINT_CORS_ORIGINS", "*")
+CORS_ORIGINS = [o.strip() for o in CORS_ORIGINS_RAW.split(",") if o.strip()] or ["*"]
+
 app = FastAPI(title="OSINT API Gateway")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "api-key", "Authorization", "X-Requested-With"],
+    expose_headers=["Content-Type", "X-Request-ID"],
+    max_age=600,  # cache preflight 10 min
+)
+
 redis_client = redis.from_url(REDIS_URL)
+
+
+@app.get("/healthz", tags=["meta"])
+def healthz():
+    """Lightweight liveness probe used by the HTML UI and external monitors.
+
+    Returns 200 even if Redis is briefly unreachable - we only need to know
+    the FastAPI worker itself is up. A separate readiness probe (TODO: future)
+    will check downstream Redis/Postgres.
+    """
+    return {"status": "ok", "service": "osint-api-gateway"}
 
 # --- Request/Response Schemas ---
 
@@ -209,6 +239,202 @@ def purchase_credits(
         status="pending",
         checkout_url=checkout_url
     )
+
+
+# --- Dev / Free Search Endpoint (DEVELOPMENT ONLY) ---
+#
+# Purpose:
+#   Give frontend devs and CI a way to exercise the OSINT pipeline UI without
+#   an API key, without credits, without a running worker, and without writing
+#   to the database. Returns a deterministic mocked result for any
+#   (target_type, target) so the HTML UI can render against it.
+#
+#   Production deployments MUST disable this endpoint (set
+#   OSINT_ENABLE_FREE_SEARCH=false in the gateway environment).
+
+ENABLE_FREE_SEARCH = os.getenv("OSINT_ENABLE_FREE_SEARCH", "true").lower() in ("1", "true", "yes")
+
+
+def _free_search_mock(target_type: str, target: str) -> dict:
+    """Build a deterministic mock OSINT result for dev. Pure function, no I/O."""
+    # Deterministic per (target_type, target) so repeated calls return
+    # the same shape, which is what frontend tests expect.
+    seed = abs(hash((target_type.lower(), target.lower()))) % 1000
+
+    base = {
+        "tool": f"{target_type}-probe",
+        "target_type": target_type,
+        "target_value": target,
+        "source": "mock",
+        "seed": seed,
+    }
+
+    if target_type == "username":
+        base["matches"] = [
+            {"site": "GitHub",   "url": f"https://github.com/{target}",   "status": "available" if seed % 2 == 0 else "claimed"},
+            {"site": "Twitter",  "url": f"https://twitter.com/{target}",  "status": "available" if seed % 3 == 0 else "claimed"},
+            {"site": "Reddit",   "url": f"https://reddit.com/u/{target}",  "status": "available" if seed % 5 == 0 else "taken"},
+        ]
+    elif target_type == "email":
+        domain = target.split("@", 1)[1] if "@" in target else "unknown.local"
+        base["matches"] = [
+            {"service": "Gravatar",       "url": f"https://www.gravatar.com/avatar/{target}", "status": "found" if seed % 2 == 0 else "missing"},
+            {"service": "GitHub Commits", "url": f"https://github.com/search?q={target}&type=commits", "status": "found" if seed % 3 == 0 else "none"},
+            {"service": "HaveIBeenPwned", "url": f"https://haveibeenpwned.com/unifiedsearch/{target}", "breaches": seed % 4},
+            {"domain_hint": domain},
+        ]
+    elif target_type == "domain":
+        base["matches"] = [
+            {"type": "A",    "value": f"203.0.113.{seed % 254 + 1}"},
+            {"type": "MX",   "value": f"mail.{target}"},
+            {"type": "NS",   "value": f"ns1.{target}"},
+            {"type": "TXT",  "value": "v=spf1 include:_spf.{target} -all"},
+        ]
+    elif target_type == "phone":
+        base["matches"] = [
+            {"carrier": "mock-carrier", "country": "US" if target.startswith("+1") else "??", "line_type": "mobile"},
+            {"spam_score": (seed % 100) / 100.0},
+        ]
+    else:
+        base["matches"] = []
+
+    return base
+
+
+class FreeSearchRequest(BaseModel):
+    target_type: str = Field(..., description="username | email | domain | phone")
+    target: str = Field(..., description="The target value to probe")
+
+    @field_validator("target_type")
+    @classmethod
+    def _v_type(cls, v):
+        allowed = {"username", "email", "domain", "phone"}
+        if v not in allowed:
+            raise ValueError(f"target_type must be one of {sorted(allowed)}")
+        return v
+
+
+class FreeSearchResponse(BaseModel):
+    dev_mode: bool = True
+    target_type: str
+    target: str
+    result: dict
+
+
+def _serve_free_search(target_type: str, target: str) -> FreeSearchResponse:
+    """Internal helper used by both GET and POST variants of /dev/free-search.
+
+    Raises 422 if target_type is not one of the supported values, so the
+    GET and POST variants behave consistently.
+    """
+    allowed = {"username", "email", "domain", "phone"}
+    if target_type not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"target_type must be one of {sorted(allowed)}",
+        )
+    return FreeSearchResponse(
+        target_type=target_type,
+        target=target,
+        result=_free_search_mock(target_type, target),
+    )
+
+
+@app.get("/dev/free-search", response_model=FreeSearchResponse)
+def free_search_get(
+    target_type: str,
+    target: str,
+):
+    """Dev-only: synchronous mock OSINT lookup. No auth, no credits, no DB writes.
+
+    Disable in production by setting OSINT_ENABLE_FREE_SEARCH=false.
+    """
+    if not ENABLE_FREE_SEARCH:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return _serve_free_search(target_type, target)
+
+
+@app.post("/dev/free-search", response_model=FreeSearchResponse)
+def free_search_post(payload: FreeSearchRequest):
+    """POST variant of /dev/free-search. Same semantics as GET."""
+    if not ENABLE_FREE_SEARCH:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return _serve_free_search(payload.target_type, payload.target)
+
+
+# --- Real Job Read Endpoint ---
+#
+# The OpenAPI spec and the HTML UI both promise `GET /v1/jobs/{id}` to
+# inspect a job's status and collected tool results. This endpoint does
+# NOT consume credits; it only reads existing rows.
+
+class JobResultRead(BaseModel):
+    tool_name: str
+    status_code: Optional[int] = None
+    raw_output: Optional[str] = None
+    parsed_data: Optional[dict] = None
+    executed_at: Optional[str] = None
+
+
+class JobRead(BaseModel):
+    job_id: uuid.UUID
+    profile_id: Optional[uuid.UUID] = None
+    parent_job_id: Optional[uuid.UUID] = None
+    depth: int
+    target_type: str
+    target_value: str
+    requested_tools: List[str]
+    status: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    results: List[JobResultRead] = []
+
+
+def _iso(value) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+@app.get("/v1/jobs/{job_id}", response_model=JobRead)
+def read_job(
+    job_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return a job and its tool results. Auth required, no credit cost."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Tenancy: a job can only be read by its owning user.
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    results = [
+        JobResultRead(
+            tool_name=r.tool_name,
+            status_code=r.status_code,
+            raw_output=r.raw_output,
+            parsed_data=r.parsed_data,
+            executed_at=_iso(r.executed_at),
+        )
+        for r in (job.results or [])
+    ]
+
+    return JobRead(
+        job_id=job.id,
+        profile_id=job.profile_id,
+        parent_job_id=job.parent_job_id,
+        depth=job.depth,
+        target_type=job.target_type,
+        target_value=job.target_value,
+        requested_tools=job.requested_tools or [],
+        status=job.status,
+        created_at=_iso(job.created_at),
+        updated_at=_iso(job.updated_at),
+        expires_at=_iso(job.expires_at),
+        results=results,
+    )
+
 
 if __name__ == "__main__":
     import uvicorn

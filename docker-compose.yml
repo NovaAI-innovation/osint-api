@@ -78,6 +78,13 @@ services:
       - DB_PASSWORD=password
       - REDIS_URL=redis://redis:6379
       - LOG_LEVEL=info
+      # CORS: who can call this gateway from a browser. Default "*" for dev.
+      # In production set to the public origin of the HTML UI, e.g.
+      #   - OSINT_CORS_ORIGINS=https://app.example.com
+      # or use OSINT_API_PROXY=1 on the web container so the browser
+      # and API share an origin and CORS is unnecessary.
+      - OSINT_CORS_ORIGINS=${OSINT_CORS_ORIGINS:-*}
+      - OSINT_ENABLE_FREE_SEARCH=${OSINT_ENABLE_FREE_SEARCH:-true}
     volumes:
       - ./shared:/app/shared
     depends_on:
@@ -153,6 +160,26 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Web UI: static HTML dev console, served by nginx.
+  # Two modes, selected by the entrypoint via OSINT_API_PROXY:
+  #   OSINT_API_PROXY=0 (default) -> static-only, browser -> gateway cross-origin (CORS)
+  #   OSINT_API_PROXY=1            -> reverse-proxy, browser sees one origin (no CORS)
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./web/nginx.conf:/etc/nginx/conf.available/nginx.conf:ro
+      - ./web/nginx-proxy.conf:/etc/nginx/conf.available/nginx-proxy.conf:ro
+      - ./web/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      - OSINT_API_PROXY=${OSINT_API_PROXY:-0}
+    depends_on:
+      - api-gateway
     restart: unless-stopped
 
 volumes:

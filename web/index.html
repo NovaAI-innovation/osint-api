@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OSINT API - Dev Console</title>
+<style>
+:root{--bg:#0f1115;--panel:#181b22;--p2:#20242d;--bd:#2a2f3a;--fg:#e6e9ef;--muted:#9aa3b2;--acc:#5b8def;--acc2:#7aa2ff;--ok:#43c47a;--warn:#f0b03e;--bad:#ef5b6b;--code:#11141a}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5}
+header{padding:16px 24px;border-bottom:1px solid var(--bd);background:#14171f;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+header h1{margin:0;font-size:18px}.accent{color:var(--acc)}
+.status{font-size:12px;color:var(--muted)}.status .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px;vertical-align:middle}
+.status.ok .dot{background:var(--ok)}.status.bad .dot{background:var(--bad)}
+main{max-width:1100px;margin:0 auto;padding:24px;display:grid;gap:18px}
+.panel{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:18px}
+.panel h2{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
+.row{display:grid;gap:10px;grid-template-columns:repeat(12,1fr)}
+.c2{grid-column:span 2}.c3{grid-column:span 3}.c4{grid-column:span 4}.c7{grid-column:span 7}.c8{grid-column:span 8}.c12{grid-column:span 12}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+input,select,textarea{width:100%;background:var(--p2);border:1px solid var(--bd);color:var(--fg);padding:8px 10px;border-radius:6px;font-family:inherit;font-size:13px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+button{background:var(--acc);border:none;color:#fff;padding:9px 14px;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px}
+button:hover{background:var(--acc2)}button:disabled{background:#3a4150;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--fg);border:1px solid var(--bd)}button.ghost:hover{background:var(--p2)}
+.tabs{display:flex;gap:6px;margin-bottom:14px}.tabs button{background:transparent;color:var(--muted);border:1px solid var(--bd);padding:7px 12px}
+.tabs button.active{background:var(--acc);color:#fff;border-color:var(--acc)}
+.results{background:var(--code);border:1px solid var(--bd);border-radius:8px;padding:12px}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:#d6dbe5}
+.empty{color:var(--muted);font-style:italic}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;background:var(--p2);color:var(--muted);margin-right:6px}
+.badge.good{background:rgba(67,196,122,.15);color:var(--ok)}.badge.warn{background:rgba(240,176,62,.15);color:var(--warn)}.badge.bad{background:rgba(239,91,107,.15);color:var(--bad)}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.small{font-size:11px;color:var(--muted)}
+code{background:var(--p2);padding:1px 4px;border-radius:3px;font-size:12px}
+.log{max-height:260px;overflow-y:auto}
+.log .line{font-family:ui-monospace,monospace;font-size:12px;color:var(--muted);padding:2px 0}
+.log .line .ts{color:#555a66;margin-right:8px}
+.log .line.info{color:#cfd5e0}.log .line.ok{color:var(--ok)}.log .line.warn{color:var(--warn)}.log .line.bad{color:var(--bad)}
+details summary{cursor:pointer;color:var(--muted);font-size:12px}details[open] summary{margin-bottom:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="accent">&#9679;</span> OSINT API - Dev Console</h1>
+  <div class="status" id="health-status"><span class="dot"></span><span id="health-text">checking gateway...</span></div>
+</header>
+<main>
+  <section class="panel">
+    <h2>Connection</h2>
+    <div class="row">
+      <div class="c8"><label>API base URL</label><input id="api-base" type="url" value="http://localhost:8000" /></div>
+      <div class="c4"><label>API key (real mode only)</label><input id="api-key" type="password" placeholder="osint_xxxxxxxxxxxx" /></div>
+    </div>
+    <div class="small" style="margin-top:8px">HTML UI on <code>http://localhost:8080</code>, gateway on <code>http://localhost:8000</code>. Change the API base URL if your stack runs elsewhere.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Run a search</h2>
+    <div class="tabs">
+      <button id="tab-free" class="active">Free Dev Search (no auth)</button>
+      <button id="tab-real">Real API (credits required)</button>
+    </div>
+    <div id="free-pane">
+      <div class="row">
+        <div class="c3"><label>Target type</label>
+          <select id="free-type"><option value="username">username</option><option value="email">email</option><option value="domain">domain</option><option value="phone">phone</option></select>
+        </div>
+        <div class="c7"><label>Target value</label><input id="free-target" type="text" value="alice" /></div>
+        <div class="c2" style="display:flex;align-items:flex-end"><button id="free-run">Run</button></div>
+      </div>
+      <div class="small" style="margin-top:8px">Calls <code>GET /dev/free-search</code>. Synchronous mock. No DB, no Redis, no credits.</div>
+    </div>
+    <div id="real-pane" style="display:none">
+      <div class="row">
+        <div class="c3"><label>Target type</label>
+          <select id="real-type"><option value="username">username</option><option value="email">email</option><option value="domain">domain</option><option value="phone">phone</option></select>
+        </div>
+        <div class="c7"><label>Target value</label><input id="real-target" type="text" value="alice" /></div>
+        <div class="c2"><label>Max depth</label>
+          <select id="real-depth"><option>0</option><option selected>1</option><option>2</option><option>3</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="c12"><label>Tools (comma separated; empty = default)</label><input id="real-tools" type="text" placeholder="sherlock, holehe, theHarvester" /></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="c12">
+          <button id="real-run">Submit job</button>
+          <button id="real-poll-stop" class="ghost" disabled>Stop polling</button>
+          <span class="small" id="real-status" style="margin-left:10px"></span>
+        </div>
+      </div>
+      <div class="small" style="margin-top:8px">Calls <code>POST /v1/profiles</code>, then polls <code>GET /v1/jobs/{id}</code> every 2s.</div>
+    </div>
+    <div style="margin-top:14px">
+      <div class="toolbar">
+        <span class="badge" id="result-badge">empty</span>
+        <span class="small" id="result-meta"></span>
+        <span style="flex:1"></span>
+        <button class="ghost" id="copy-btn">Copy JSON</button>
+      </div>
+      <div class="results" style="margin-top:8px"><pre id="result-json"><span class="empty">Run a search to see results.</span></pre></div>
+    </div>
+  </section>
+
+  <section class="panel"><h2>Activity log</h2><div class="log" id="log"></div></section>
+
+  <section class="panel">
+    <h2>API reference</h2>
+    <details><summary>Show endpoint details</summary>
+<pre>GET  /healthz                              gateway liveness
+GET  /dev/free-search?target_type=&amp;target= synchronous mock (no auth, no DB)
+POST /dev/free-search         body: {target_type, target}
+POST /v1/profiles             body: {target, target_type, tools[], max_depth}  headers: api-key
+GET  /v1/jobs/{id}            headers: api-key
+POST /v1/credits/purchase     body: {amount_cents, payment_method}             headers: api-key</pre>
+    </details>
+    <div class="small" style="margin-top:10px">Disable <code>/dev/free-search</code> in production with <code>OSINT_ENABLE_FREE_SEARCH=false</code> on the gateway.</div>
+  </section>
+</main>
+<script>
+(function(){
+  var $=function(s){return document.querySelector(s)};
+  var apiBase=$("#api-base"),apiKey=$("#api-key");
+  var healthStatus=$("#health-status"),healthText=$("#health-text");
+  var tabFree=$("#tab-free"),tabReal=$("#tab-real");
+  var freePane=$("#free-pane"),realPane=$("#real-pane");
+  var resultBadge=$("#result-badge"),resultMeta=$("#result-meta"),resultJson=$("#result-json");
+  var logEl=$("#log");
+  var realStatus=$("#real-status"),stopBtn=$("#real-poll-stop");
+  var pollTimer=null,lastJsonText="";
+
+  function log(line,cls){
+    var ts=new Date().toISOString().replace("T"," ").slice(0,19);
+    var div=document.createElement("div");div.className="line "+(cls||"info");
+    div.innerHTML='<span class="ts">'+ts+'</span>'+esc(line);
+    logEl.appendChild(div);logEl.scrollTop=logEl.scrollHeight;
+  }
+  function esc(s){return String(s).replace(/[&<>"']/g,function(c){return({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[c];});}
+  function show(obj,badge,meta,cls){
+    lastJsonText=JSON.stringify(obj,null,2);
+    resultJson.textContent=lastJsonText;
+    resultBadge.textContent=badge;
+    resultBadge.className="badge "+(cls||"");
+    resultMeta.textContent=meta||"";
+  }
+  function http(method,path,body){
+    var base=apiBase.value.replace(/\/$/,"");
+    var headers={"Content-Type":"application/json"};
+    if(apiKey.value) headers["api-key"]=apiKey.value;
+    return fetch(base+path,{method:method,headers:headers,body:body?JSON.stringify(body):undefined}).then(function(res){
+      return res.text().then(function(text){
+        var data;try{data=JSON.parse(text);}catch(e){data={_raw:text};}
+        return{status:res.status,data:data};
+      });
+    });
+  }
+
+  // Auto-detect same-origin vs cross-origin.
+  // When the nginx container proxies /v1/* to the gateway internally,
+  // the page and the API live at the same origin and we can use relative
+  // URLs (no API base URL needed). When the gateway lives on a separate
+  // port we pre-fill the default cross-origin URL.
+  (function detectOrigin(){
+    var sameOrigin=false;
+    try{
+      // If the page is served from a static asset at the same origin and
+      // can resolve /healthz over fetch, we're in proxy mode.
+      fetch(window.location.origin+"/healthz",{method:"HEAD",cache:"no-store"}).then(function(r){
+        if(r.ok || r.status===405){
+          sameOrigin=true;
+          apiBase.value=window.location.origin;
+          healthStatus.className="status ok";
+          healthText.textContent="proxy mode (same origin)";
+        }
+      }).catch(function(){});
+    }catch(e){}
+    // Fallback default: separate ports -> classic localhost dev setup.
+    if(!sameOrigin && !apiBase.value){
+      apiBase.value=window.location.protocol+"//"+window.location.hostname+":8000";
+    }
+  })();
+
+  function checkHealth(){
+    http("GET","/healthz").then(function(r){
+      if(r.status===200){healthStatus.className="status ok";healthText.textContent="gateway reachable";}
+      else{healthStatus.className="status bad";healthText.textContent="gateway HTTP "+r.status;}
+    }).catch(function(e){
+      healthStatus.className="status bad";healthText.textContent="gateway unreachable";
+    });
+  }
+
+  function runFree(){
+    var tt=$("#free-type").value,tv=$("#free-target").value.trim();
+    if(!tv){log("target required","warn");return;}
+    log("free-search "+tt+"="+tv);
+    http("GET","/dev/free-search?target_type="+encodeURIComponent(tt)+"&target="+encodeURIComponent(tv))
+      .then(function(r){
+        if(r.status!==200){show(r.data,"http "+r.status,"","bad");log("free-search failed HTTP "+r.status,"bad");return;}
+        show(r.data,"mock","dev_mode=true","good");log("free-search ok","ok");
+      }).catch(function(e){show({error:String(e)},"network","","bad");log("free-search network error","bad");});
+  }
+
+  function runReal(){
+    var tt=$("#real-type").value,tv=$("#real-target").value.trim();
+    var depth=parseInt($("#real-depth").value,10)||1;
+    var toolsRaw=$("#real-tools").value.trim();
+    var tools=toolsRaw?toolsRaw.split(",").map(function(s){return s.trim();}).filter(Boolean):[];
+    if(!tv){log("target required","warn");return;}
+    log("submitting job "+tt+"="+tv+" depth="+depth);
+    realStatus.textContent="submitting...";$("#real-run").disabled=true;
+    http("POST","/v1/profiles",{target:tv,target_type:tt,tools:tools,max_depth:depth})
+      .then(function(r){
+        if(r.status!==200&&r.status!==202){show(r.data,"http "+r.status,"","bad");realStatus.textContent="failed";$("#real-run").disabled=false;log("submit failed HTTP "+r.status,"bad");return;}
+        var jobId=r.data.job_id||(r.data.data&&r.data.data.job_id);
+        show(r.data,"queued","job_id="+jobId,"warn");
+        log("queued job "+jobId,"ok");realStatus.textContent="polling job "+jobId;
+        stopBtn.disabled=false;
+        pollJob(jobId);
+      }).catch(function(e){show({error:String(e)},"network","","bad");realStatus.textContent="network error";$("#real-run").disabled=false;log("submit network error","bad");});
+  }
+
+  function pollJob(jobId){
+    if(pollTimer) clearTimeout(pollTimer);
+    http("GET","/v1/jobs/"+jobId).then(function(r){
+      var st=(r.data&&r.data.status)||"unknown";
+      realStatus.textContent="status="+st;
+      show(r.data,st,"job_id="+jobId,(st==="completed"?"good":st==="failed"?"bad":"warn"));
+      if(st==="completed"||st==="failed"||st==="cancelled"||st==="quarantined"){
+        stopBtn.disabled=true;$("#real-run").disabled=false;log("job "+st,"ok");return;
+      }
+      pollTimer=setTimeout(function(){pollJob(jobId);},2000);
+    }).catch(function(e){
+      realStatus.textContent="poll error";log("poll error: "+e,"bad");
+      pollTimer=setTimeout(function(){pollJob(jobId);},4000);
+    });
+  }
+
+  function stopPolling(){if(pollTimer) clearTimeout(pollTimer);pollTimer=null;stopBtn.disabled=true;realStatus.textContent="stopped";$("#real-run").disabled=false;}
+
+  tabFree.onclick=function(){tabFree.className="active";tabReal.className="";freePane.style.display="";realPane.style.display="none";};
+  tabReal.onclick=function(){tabReal.className="active";tabFree.className="";realPane.style.display="";freePane.style.display="none";};
+  $("#free-run").onclick=runFree;
+  $("#real-run").onclick=runReal;
+  stopBtn.onclick=stopPolling;
+  $("#copy-btn").onclick=function(){if(!lastJsonText)return;navigator.clipboard&&navigator.clipboard.writeText(lastJsonText).then(function(){log("copied JSON to clipboard","ok");});};
+  $("#free-target").addEventListener("keydown",function(e){if(e.key==="Enter")runFree();});
+  $("#real-target").addEventListener("keydown",function(e){if(e.key==="Enter")runReal();});
+
+  checkHealth();
+  setInterval(checkHealth,15000);
+  log("console ready. free mode = default","info");
+})();
+</script>
+</body>
+</html>
