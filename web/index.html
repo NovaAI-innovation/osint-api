@@ -156,29 +156,34 @@ POST /v1/credits/purchase     body: {amount_cents, payment_method}             h
     });
   }
 
-  // Auto-detect same-origin vs cross-origin.
-  // When the nginx container proxies /v1/* to the gateway internally,
-  // the page and the API live at the same origin and we can use relative
-  // URLs (no API base URL needed). When the gateway lives on a separate
-  // port we pre-fill the default cross-origin URL.
+  // Auto-detect API base URL on load.
+  //
+  // Two deployment topologies are supported:
+  //   1. SAME ORIGIN  (nginx proxies /v1/* to the gateway internally;
+  //                    no port difference from the browser's POV)
+  //   2. CROSS ORIGIN (gateway on a separate port, e.g. :8000)
+  //
+  // The default for cross-origin MUST use window.location.hostname rather
+  // than "localhost", so it works whether the user accesses the UI from
+  // their own machine via http://localhost:8080 OR from a remote host
+  // like http://187.77.100.89:8080.
   (function detectOrigin(){
-    var sameOrigin=false;
-    try{
-      // If the page is served from a static asset at the same origin and
-      // can resolve /healthz over fetch, we're in proxy mode.
-      fetch(window.location.origin+"/healthz",{method:"HEAD",cache:"no-store"}).then(function(r){
-        if(r.ok || r.status===405){
-          sameOrigin=true;
-          apiBase.value=window.location.origin;
-          healthStatus.className="status ok";
-          healthText.textContent="proxy mode (same origin)";
+    var crossOriginDefault = window.location.protocol + "//" + window.location.hostname + ":8000";
+    apiBase.value = crossOriginDefault;
+    log("api base (default cross-origin): " + crossOriginDefault, "info");
+
+    // Probe 1: same-origin (proxy mode). If /healthz returns 2xx or
+    // 405 at the same origin, switch to same-origin (relative URL).
+    fetch(window.location.origin + "/healthz", {method:"HEAD", cache:"no-store"})
+      .then(function(r){
+        if (r.ok || r.status === 405) {
+          apiBase.value = window.location.origin;
+          healthStatus.className = "status ok";
+          healthText.textContent = "proxy mode (same origin)";
+          log("detected same-origin proxy mode", "ok");
         }
-      }).catch(function(){});
-    }catch(e){}
-    // Fallback default: separate ports -> classic localhost dev setup.
-    if(!sameOrigin && !apiBase.value){
-      apiBase.value=window.location.protocol+"//"+window.location.hostname+":8000";
-    }
+      })
+      .catch(function(){});
   })();
 
   function checkHealth(){
